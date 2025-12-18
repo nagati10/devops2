@@ -1,94 +1,49 @@
 pipeline {
     agent any
-    
-    tools {
-        maven 'M2_HOME'
-        jdk '$JAVA_HOME'
-    }
 
     environment {
-        DOCKER_IMAGE = 'najdnagati/student-management'
-        DOCKER_TAG = "${env.BUILD_NUMBER}"
-        K8S_NAMESPACE = 'devops'
-        SONARQUBE_URL = 'http://localhost:9000'
-        SPRING_BOOT_URL = 'http://localhost:30080'
+        DOCKER_IMAGE = "najdnagati/student-management"
+        DOCKER_TAG   = "1.0.0"
+        GIT_REPO     = "https://github.com/nagati10/devops2.git"  // Changed to devops2
+        GIT_BRANCH   = "main"
+        SONAR_PROJECT_KEY = "student-management"
+        SONAR_PROJECT_NAME = "Student Management System"
+    }
+
+    tools {
+        maven 'M2_HOME'
+        jdk   '$JAVA_HOME'  // This worked before
     }
 
     stages {
-        stage('Clean Workspace') {
+        stage('RÉCUPÉRATION CODE') {
             steps {
-                cleanWs()
-                echo "✅ Workspace cleaned for build #${env.BUILD_NUMBER}"
-            }
-        }
-
-        stage('Checkout Code') {
-            steps {
-                // Use main branch, not master
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: '*/main']],
-                    extensions: [],
-                    userRemoteConfigs: [[
-                        url: 'https://github.com/nagati10/devops2.git'
-                    ]]
-                ])
+                // Remove credentials to test
+                git branch: "${GIT_BRANCH}", url: "${GIT_REPO}"
                 
-                echo "✅ Code fetched from GitHub (main branch)"
-                
+                // Debug: Show what was checked out
                 sh '''
-                    echo "=== Repository Contents ==="
+                    echo "✅ Code récupéré avec succès"
+                    echo ""
+                    echo "=== Contenu du répertoire ==="
                     pwd
                     ls -la
                     echo ""
-                    echo "=== Checking project structure ==="
-                    [ -f "pom.xml" ] && echo "✅ pom.xml found" || echo "❌ pom.xml not found"
-                    [ -d "src" ] && echo "✅ src directory found" || echo "❌ src directory not found"
-                    [ -f "Dockerfile" ] && echo "✅ Dockerfile found" || echo "❌ Dockerfile not found"
+                    echo "=== Vérification des fichiers ==="
+                    [ -f "pom.xml" ] && echo "✅ pom.xml trouvé" || echo "❌ pom.xml non trouvé"
+                    [ -d "src" ] && echo "✅ src/ trouvé" || echo "❌ src/ non trouvé"
+                    echo ""
+                    echo "=== Information git ==="
+                    git status
+                    git branch -a
                 '''
             }
         }
 
-        stage('Setup Environment') {
+        stage('TESTS UNITAIRES & JaCoCo') {
             steps {
-                sh '''
-                    echo "=== Environment Setup ==="
-                    echo "Java Version:"
-                    java -version
-                    echo "Maven Version:"
-                    mvn --version
-                '''
+                sh "mvn clean test jacoco:report"
             }
-        }
-
-        stage('Build & Test') {
-            steps {
-                sh '''
-                    echo "=== Building Application ==="
-                    
-                    # Clean first
-                    mvn clean
-                    
-                    # Compile
-                    mvn compile
-                    
-                    echo "✅ Compilation successful"
-                    
-                    # Run tests
-                    mvn test
-                    
-                    echo "✅ Tests completed"
-                    
-                    # Generate reports
-                    mvn jacoco:report
-                    
-                    # Show results
-                    echo "=== Test Results ==="
-                    find target/surefire-reports -name "*.xml" 2>/dev/null | head -3
-                    [ -f "target/site/jacoco/jacoco.xml" ] && echo "✅ JaCoCo report generated"
-                '''
-            }
-            
             post {
                 always {
                     junit 'target/surefire-reports/*.xml'
@@ -96,187 +51,200 @@ pipeline {
             }
         }
 
-        stage('Package Application') {
+        stage('VÉRIFICATION COUVERTURE') {
             steps {
-                sh '''
-                    echo "=== Packaging Application ==="
-                    
-                    # Package without tests
-                    mvn package -DskipTests
-                    
-                    echo "✅ Application packaged"
-                    ls -lh target/*.jar
-                '''
-                
-                archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+                script {
+                    sh '''
+                        echo "🔍 Vérification de la couverture de code..."
+                        
+                        # Check JaCoCo report exists
+                        if [ -f "target/site/jacoco/jacoco.xml" ]; then
+                            echo "✅ Rapport JaCoCo généré avec succès"
+                            
+                            # Extract coverage percentage
+                            COVERAGE=$(grep -o 'line-counter.*covered="[0-9]*"' target/site/jacoco/jacoco.xml | head -1 | grep -o '[0-9]*' | head -1)
+                            if [ ! -z "$COVERAGE" ] && [ "$COVERAGE" -gt "0" ]; then
+                                echo "✅ Couverture de code: $COVERAGE% (différente de 0)"
+                            else
+                                echo "⚠️  Couverture faible ou nulle"
+                            fi
+                        else
+                            echo "❌ Échec: Rapport JaCoCo non généré"
+                            exit 1
+                        fi
+                    '''
+                }
             }
         }
 
-        stage('Build Docker Image') {
+        stage('ANALYSE SONARQUBE') {
             steps {
-                sh """
-                    echo "=== Building Docker Image ==="
-                    
-                    # Check Dockerfile
-                    if [ -f "Dockerfile" ]; then
-                        echo "✅ Dockerfile found"
-                    else
-                        echo "❌ Dockerfile not found!"
-                        exit 1
-                    fi
-                    
-                    # Build Docker image
-                    docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
-                    docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest
-                    
-                    echo "✅ Docker images created:"
-                    docker images | grep ${DOCKER_IMAGE}
-                """
+                script {
+                    withSonarQubeEnv('SonarQube') {
+                        sh """
+                            echo "🔍 Lancement de l'analyse SonarQube..."
+                            
+                            mvn sonar:sonar \
+                                -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                                -Dsonar.projectName="${SONAR_PROJECT_NAME}" \
+                                -Dsonar.java.binaries=target/classes \
+                                -Dsonar.junit.reportsPath=target/surefire-reports \
+                                -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+                            
+                            echo "✅ Analyse SonarQube terminée"
+                            echo "📊 Accédez au dashboard: http://localhost:9000/dashboard?id=${SONAR_PROJECT_KEY}"
+                        """
+                    }
+                }
             }
         }
 
-        stage('Push to DockerHub') {
+        stage('CONSTRUCTION LIVRABLE') {
+            steps {
+                sh "mvn package -DskipTests"
+            }
+        }
+
+        stage('BUILD DOCKER IMAGE') {
+            steps {
+                script {
+                    sh """
+                        docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
+                        docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest
+                        echo "✅ Image Docker construite: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                    """
+                }
+            }
+        }
+
+        stage('PUSH DOCKERHUB') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'najdnagati',
-                    usernameVariable: 'DOCKER_USERNAME',
-                    passwordVariable: 'DOCKER_PASSWORD'
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
                 )]) {
                     sh """
-                        echo "=== Pushing to DockerHub ==="
-                        
-                        # Login to DockerHub
-                        echo \${DOCKER_PASSWORD} | docker login -u \${DOCKER_USERNAME} --password-stdin
-                        
-                        # Push images
+                        echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
                         docker push ${DOCKER_IMAGE}:${DOCKER_TAG}
                         docker push ${DOCKER_IMAGE}:latest
-                        
-                        echo "✅ Images pushed to DockerHub"
+                        docker logout || true
+                        echo "✅ Images poussées sur DockerHub"
                     """
                 }
             }
         }
-
-        stage('Deploy to Kubernetes') {
+        
+        stage('DÉPLOIEMENT KUBERNETES') {
             steps {
                 script {
-                    // Set kubectl config
                     sh '''
-                        echo "=== Deploying to Kubernetes ==="
+                        echo "=== Déploiement sur Kubernetes ==="
+                        
+                        # Configurer kubectl
                         export KUBECONFIG=/var/lib/jenkins/.kube/config
                         
-                        # Create namespace if not exists
-                        kubectl create namespace ${K8S_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                        # Créer namespace si nécessaire
+                        kubectl create namespace devops --dry-run=client -o yaml | kubectl apply -f -
+                        
+                        echo "✅ Namespace prêt"
                     '''
                     
-                    // Deploy MySQL
+                    // Déployer MySQL
                     sh '''
-                        echo "=== Deploying MySQL ==="
+                        echo "=== Déploiement MySQL ==="
                         
-                        # Deploy MySQL
-                        kubectl apply -f mysql-deployment.yaml -n ${K8S_NAMESPACE}
-                        
-                        # Wait for MySQL
-                        echo "Waiting for MySQL..."
-                        sleep 30
-                        
-                        # Check MySQL status
-                        kubectl get pods -n ${K8S_NAMESPACE} -l app=mysql
+                        # Vérifier si MySQL est déjà déployé
+                        if ! kubectl get deployment mysql -n devops 2>/dev/null; then
+                            echo "Déploiement de MySQL..."
+                            kubectl apply -f mysql-deployment.yaml -n devops
+                            
+                            # Attendre MySQL
+                            echo "Attente du démarrage de MySQL..."
+                            sleep 30
+                            
+                            # Vérifier MySQL
+                            kubectl get pods -n devops -l app=mysql
+                            echo "✅ MySQL déployé"
+                        else
+                            echo "✅ MySQL déjà déployé"
+                        fi
                     '''
                     
-                    // Deploy Spring Boot
+                    // Déployer Spring Boot
                     sh """
-                        echo "=== Deploying Spring Boot ==="
+                        echo "=== Déploiement Spring Boot ==="
                         
-                        # Update image in deployment file
+                        # Mettre à jour l'image dans le fichier de déploiement
                         sed -i "s|image:.*najdnagati/student-management.*|image: ${DOCKER_IMAGE}:${DOCKER_TAG}|g" spring-deployment.yaml
                         
-                        # Apply deployment
-                        kubectl apply -f spring-deployment.yaml -n ${K8S_NAMESPACE}
+                        # Appliquer le déploiement
+                        kubectl apply -f spring-deployment.yaml -n devops
                         
-                        # Wait for rollout
-                        echo "Waiting for Spring Boot rollout..."
-                        kubectl rollout status deployment/spring-app -n ${K8S_NAMESPACE} --timeout=300s
+                        # Attendre le déploiement
+                        echo "Attente du déploiement Spring Boot..."
+                        kubectl rollout status deployment/spring-app -n devops --timeout=300s
                         
-                        echo "✅ Spring Boot deployed"
+                        echo "✅ Spring Boot déployé avec l'image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
                     """
                 }
             }
         }
-
-        stage('Verify Deployment') {
+        
+        stage('VÉRIFICATION DÉPLOIEMENT') {
             steps {
                 sh '''
-                    echo "=== Verification ==="
+                    echo "=== Vérification du déploiement ==="
                     
                     export KUBECONFIG=/var/lib/jenkins/.kube/config
                     
-                    echo "1. Pods Status:"
-                    kubectl get pods -n ${K8S_NAMESPACE}
+                    echo "1. État des pods:"
+                    kubectl get pods -n devops
                     
                     echo ""
                     echo "2. Services:"
-                    kubectl get svc -n ${K8S_NAMESPACE}
+                    kubectl get svc -n devops
                     
                     echo ""
-                    echo "3. Application URL:"
-                    minikube service spring-service -n ${K8S_NAMESPACE} --url 2>/dev/null || echo "Getting service URL..."
+                    echo "3. URL de l'application:"
+                    minikube service spring-service -n devops --url 2>/dev/null || echo "Récupération de l'URL..."
+                    
+                    echo "✅ Vérification terminée"
                 '''
             }
         }
     }
 
     post {
-        always {
-            echo "=== Build #${env.BUILD_NUMBER} Completed ==="
-            
-            // Archive artifacts
-            archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
-            archiveArtifacts artifacts: 'target/surefire-reports/*.xml', fingerprint: true
-            
-            // Cleanup
-            sh 'docker system prune -f 2>/dev/null || true'
-        }
-        
         success {
-            echo "🎉🎉🎉 BUILD SUCCESSFUL! 🎉🎉🎉"
+            echo "🎉 PIPELINE TERMINÉ AVEC SUCCÈS !"
+            echo "===================================="
+            echo "📦 Image Docker: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+            echo "🐋 DockerHub: https://hub.docker.com/r/najdnagati/student-management"
+            echo "📊 SonarQube: http://localhost:9000/dashboard?id=${SONAR_PROJECT_KEY}"
+            echo "📈 Rapport JaCoCo: target/site/jacoco/index.html"
+            echo "🔗 Code Source: ${GIT_REPO}"
+            echo ""
+            echo "🌐 Application déployée sur Kubernetes:"
+            echo "   Namespace: devops"
+            echo "   Service: spring-service"
+            echo "   Port: 30080"
+            echo "===================================="
             
-            script {
-                // Get URLs
-                sh '''
-                    MINIKUBE_IP=$(minikube ip 2>/dev/null || echo "localhost")
-                    SPRING_PORT=$(kubectl get svc spring-service -n ${K8S_NAMESPACE} -o jsonpath="{.spec.ports[0].nodePort}" 2>/dev/null || echo "30080")
-                    
-                    echo ""
-                    echo "=== DEPLOYMENT SUMMARY ==="
-                    echo "Application URL: http://${MINIKUBE_IP}:${SPRING_PORT}"
-                    echo "Docker Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
-                    echo "K8S Namespace: ${K8S_NAMESPACE}"
-                    echo ""
-                '''
-            }
+            archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+            sh "mvn clean || true"
         }
-        
         failure {
-            echo "❌❌❌ BUILD FAILED ❌❌❌"
+            echo "❌ ÉCHEC DU PIPELINE"
+            echo "Consultez les logs pour détails"
+            sh "mvn clean || true"
+        }
+        always {
+            echo "🧹 Nettoyage des ressources..."
+            sh "docker system prune -f || true"
             
-            script {
-                // Debug information
-                sh '''
-                    echo ""
-                    echo "=== DEBUG INFORMATION ==="
-                    echo "Workspace contents:"
-                    pwd
-                    ls -la
-                    echo ""
-                    echo "Maven build status:"
-                    ls -la target/ 2>/dev/null || echo "No target directory"
-                    echo ""
-                    echo "Docker images:"
-                    docker images | grep ${DOCKER_IMAGE} 2>/dev/null || echo "No Docker images"
-                '''
-            }
+            // Archive important reports
+            archiveArtifacts artifacts: 'target/surefire-reports/*.xml, target/site/jacoco/*', fingerprint: true
         }
     }
 }
